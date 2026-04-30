@@ -1,0 +1,246 @@
+name: NPM Audit Check
+
+# Audits the LATEST PUBLISHED version of this repo's npm package for security
+# vulnerabilities, and opens a GitHub issue if any are found (deduped by title).
+#
+# Rationale: published packages only contain `dependencies`, not `devDependencies`,
+# so auditing the source tree produces false positives (CVEs in tooling customers
+# never install). This workflow audits what customers actually get from npm.
+
+on:
+  workflow_call:
+    inputs:
+      package-name:
+        description: "npm package name to audit. Defaults to the name in ./package.json."
+        required: false
+        type: string
+        default: ""
+      audit-level:
+        description: "Minimum severity to report: low | moderate | high | critical"
+        required: false
+        type: string
+        default: "low"
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  audit-published:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Resolve package name
+        id: pkg
+        run: |
+          NAME="${{ inputs.package-name }}"
+          if [ -z "$NAME" ]; then
+            NAME=$(jq -r '.name' package.json)
+          fi
+          if [ -z "$NAME" ] || [ "$NAME" = "null" ]; then
+            echo "::error::Could not resolve package name."
+            exit 1
+          fi
+          VERSION=$(npm view "$NAME" version 2>/dev/null || true)
+          if [ -z "$VERSION" ]; then
+            echo "::error::Package '$NAME' not found on npm registry."
+            exit 1
+          fi
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Auditing $NAME@$VERSION"
+
+      - name: Audit published package
+        id: audit
+        run: |
+          NAME="${{ steps.pkg.outputs.name }}"
+          VERSION="${{ steps.pkg.outputs.version }}"
+
+          # Create an isolated dummy package and install the published version.
+          # --package-lock-only avoids running install scripts / fetching tarballs
+          # into node_modules; npm audit only needs the lockfile.
+          WORK=$(mktemp -d)
+          cd "$WORK"
+          npm init -y >/dev/null
+          npm install "$NAME@$VERSION" --package-lock-only --ignore-scripts --silent
+
+          npm audit --json --audit-level="${{ inputs.audit-level }}" > audit.json 2>/dev/null || true
+
+          TOTAL=$(jq '.metadata.vulnerabilities | .low + .moderate + .high + .critical' audit.json)
+          LOW=$(jq '.metadata.vulnerabilities.low' audit.json)
+          MOD=$(jq '.metadata.vulnerabilities.moderate' audit.json)
+          HIGH=$(jq '.metadata.vulnerabilities.high' audit.json)
+          CRIT=$(jq '.metadata.vulnerabilities.critical' audit.json)
+
+          echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
+          echo "low=$LOW" >> "$GITHUB_OUTPUT"
+          echo "moderate=$MOD" >> "$GITHUB_OUTPUT"
+          echo "high=$HIGH" >> "$GITHUB_OUTPUT"
+          echo "critical=$CRIT" >> "$GITHUB_OUTPUT"
+          echo "audit_path=$WORK/audit.json" >> "$GITHUB_OUTPUT"
+
+          # Summary
+          {
+            echo "## NPM Audit — $NAME@$VERSION"
+            echo ""
+            echo "| Severity | Count |"
+            echo "|----------|-------|"
+            echo "| Critical | $CRIT |"
+            echo "| High     | $HIGH |"
+            echo "| Moderate | $MOD  |"
+            echo "| Low      | $LOW  |"
+            echo "| **Total**| **$TOTAL** |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$TOTAL" = "0" ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "✅ No vulnerabilities found in published package." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Render vulnerability list
+        if: steps.audit.outputs.total != '0'
+        run: |
+          AUDIT="${{ steps.audit.outputs.audit_path }}"
+          # Per-vulnerability list, one line each. Handles both string and object
+          # entries in the `via` array (npm audit mixes them).
+          jq -r '
+            .vulnerabilities
+            | to_entries[]
+            | "- **\(.value.severity)**: `\(.key)` — via \(.value.via | map(if type == "string" then . else .title end) | join(", "))"
+          ' "$AUDIT" > /tmp/vuln-list.md
+          echo "Vulnerabilities:"
+          cat /tmp/vuln-list.md
+
+      - name: Find existing rolling issue
+        id: existing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # One rolling issue per repo. Identified by label `npm-audit`, state open.
+          # If multiple open issues somehow exist, pick the most recently updated and
+          # list the rest as "extras" so we can close them as superseded.
+          ISSUES=$(gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --label npm-audit \
+            --json number,title,updatedAt \
+            --jq 'sort_by(.updatedAt) | reverse')
+
+          PRIMARY=$(echo "$ISSUES" | jq -r '.[0].number // empty')
+          EXTRAS=$(echo "$ISSUES" | jq -r '.[1:] | map(.number) | join(",")')
+
+          echo "primary=$PRIMARY" >> "$GITHUB_OUTPUT"
+          echo "extras=$EXTRAS" >> "$GITHUB_OUTPUT"
+          echo "Primary open issue: ${PRIMARY:-none}"
+          [ -n "$EXTRAS" ] && echo "Extra open issues (will be closed as superseded): $EXTRAS"
+
+      - name: Ensure label exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create npm-audit \
+            --repo "$GITHUB_REPOSITORY" \
+            --color "d73a4a" \
+            --description "Security vulnerability found by npm-audit-check workflow" \
+            2>/dev/null || true
+
+      - name: Close rolling issue (no vulnerabilities)
+        if: steps.audit.outputs.total == '0' && steps.existing.outputs.primary != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE: ${{ steps.existing.outputs.primary }}
+          PKG_NAME: ${{ steps.pkg.outputs.name }}
+          PKG_VERSION: ${{ steps.pkg.outputs.version }}
+        run: |
+          COMMENT="✅ Resolved. \`${PKG_NAME}@${PKG_VERSION}\` now reports 0 vulnerabilities from \`npm audit\`. Closed automatically by [run #${GITHUB_RUN_NUMBER}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})."
+          gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body "$COMMENT"
+          gh issue close "$ISSUE" --repo "$GITHUB_REPOSITORY" --reason completed
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ Closed resolved issue [#$ISSUE]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/issues/$ISSUE)." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create or update rolling issue (vulnerabilities found)
+        if: steps.audit.outputs.total != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EXISTING: ${{ steps.existing.outputs.primary }}
+          EXTRAS: ${{ steps.existing.outputs.extras }}
+          PKG_NAME: ${{ steps.pkg.outputs.name }}
+          PKG_VERSION: ${{ steps.pkg.outputs.version }}
+          TOTAL: ${{ steps.audit.outputs.total }}
+          CRIT: ${{ steps.audit.outputs.critical }}
+          HIGH: ${{ steps.audit.outputs.high }}
+          MOD: ${{ steps.audit.outputs.moderate }}
+          LOW: ${{ steps.audit.outputs.low }}
+        run: |
+          # Title stays stable across runs (no counts/version) so notification
+          # spam is minimised. Body carries the current state.
+          TITLE="[npm-audit] ${PKG_NAME} — vulnerabilities found"
+
+          PLURAL="ies"
+          [ "$TOTAL" = "1" ] && PLURAL="y"
+
+          # ISO 8601 UTC timestamp for the "last checked" footer.
+          NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          BODY=$(cat <<EOF
+          \`npm audit\` against the **published** version of this package found **${TOTAL} vulnerabilit${PLURAL}**.
+
+          | Severity | Count |
+          |----------|-------|
+          | Critical | ${CRIT} |
+          | High     | ${HIGH} |
+          | Moderate | ${MOD}  |
+          | Low      | ${LOW}  |
+
+          ### Vulnerable packages
+
+          $(cat /tmp/vuln-list.md)
+
+          ---
+
+          - Package: \`${PKG_NAME}@${PKG_VERSION}\`
+          - Last checked: \`${NOW}\`
+          - Latest run: [\`${GITHUB_WORKFLOW}\` run #${GITHUB_RUN_NUMBER}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})
+          - Next step: upgrade transitive dependencies on \`main\`, cut a new release, re-run this workflow.
+
+          _This is a **rolling issue** — its body is overwritten each run with the current audit state. Closes automatically when \`npm audit\` reports 0 vulnerabilities. Filed by [npm-audit-check.yml](https://github.com/aws-geospatial/github-workflows-for-amazon-location/blob/main/.github/workflows/npm-audit-check.yml) per AZLS-696._
+          EOF
+          )
+
+          if [ -n "$EXISTING" ]; then
+            gh issue edit "$EXISTING" --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body "$BODY" >/dev/null
+            gh issue comment "$EXISTING" --repo "$GITHUB_REPOSITORY" --body "🔄 Updated by [run #${GITHUB_RUN_NUMBER}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) — ${TOTAL} vulnerabilit${PLURAL} (crit: ${CRIT}, high: ${HIGH}, mod: ${MOD}, low: ${LOW})."
+            echo "Updated issue #$EXISTING."
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "🔄 Updated rolling issue [#$EXISTING]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/issues/$EXISTING) — ${TOTAL} vulnerabilit${PLURAL}." >> "$GITHUB_STEP_SUMMARY"
+            ISSUE_NUM="$EXISTING"
+          else
+            URL=$(gh issue create \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$TITLE" \
+              --body "$BODY" \
+              --label npm-audit)
+            ISSUE_NUM=$(basename "$URL")
+            echo "Opened issue: $URL"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "🚨 Filed new rolling issue: $URL" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # Close any extra open `npm-audit` issues (drift cleanup). Should be rare;
+          # would only happen if someone manually opened one, or if an older
+          # version of this workflow filed multiple.
+          if [ -n "$EXTRAS" ]; then
+            IFS=',' read -ra EXTRA_ARR <<< "$EXTRAS"
+            for N in "${EXTRA_ARR[@]}"; do
+              gh issue comment "$N" --repo "$GITHUB_REPOSITORY" --body "Superseded by #${ISSUE_NUM}. Closing as duplicate — the rolling \`npm-audit\` issue now tracks current state."
+              gh issue close "$N" --repo "$GITHUB_REPOSITORY" --reason "not planned"
+              echo "Closed superseded issue #$N"
+            done
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "ℹ️ Closed extra open npm-audit issues: $EXTRAS" >> "$GITHUB_STEP_SUMMARY"
+          fi
