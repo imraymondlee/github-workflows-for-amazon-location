@@ -137,7 +137,9 @@ jobs:
           echo "primary=$PRIMARY" >> "$GITHUB_OUTPUT"
           echo "extras=$EXTRAS" >> "$GITHUB_OUTPUT"
           echo "Primary open issue: ${PRIMARY:-none}"
-          [ -n "$EXTRAS" ] && echo "Extra open issues (will be closed as superseded): $EXTRAS"
+          if [ -n "$EXTRAS" ]; then
+            echo "Extra open issues (will be closed as superseded): $EXTRAS"
+          fi
 
       - name: Ensure label exists
         env:
@@ -182,7 +184,9 @@ jobs:
           TITLE="[npm-audit] ${PKG_NAME} — vulnerabilities found"
 
           PLURAL="ies"
-          [ "$TOTAL" = "1" ] && PLURAL="y"
+          if [ "$TOTAL" = "1" ]; then
+            PLURAL="y"
+          fi
 
           # ISO 8601 UTC timestamp for the "last checked" footer.
           NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
