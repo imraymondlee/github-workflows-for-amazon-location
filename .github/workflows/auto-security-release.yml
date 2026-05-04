@@ -165,6 +165,14 @@ jobs:
           fi
           echo "CHANGELOG.md updated for ${NEW_VERSION}"
 
+      - name: Run prettier on modified files
+        if: steps.bump.outputs.new_version != '' && steps.detect.outputs.ecosystem == 'node'
+        run: |
+          npx prettier --write package.json CHANGELOG.md
+          if [ -f package-lock.json ]; then
+            npx prettier --write package-lock.json
+          fi
+
       - name: Create Pull Request
         if: steps.bump.outputs.new_version != ''
         uses: peter-evans/create-pull-request@v6
