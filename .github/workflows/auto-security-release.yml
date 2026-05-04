@@ -35,6 +35,11 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.x"
+
       - name: Detect ecosystem
         id: detect
         run: |
@@ -164,6 +169,10 @@ jobs:
             echo -e "# Changes\n\n${ENTRY}" > CHANGELOG.md
           fi
           echo "CHANGELOG.md updated for ${NEW_VERSION}"
+
+      - name: Install dependencies
+        if: steps.bump.outputs.new_version != '' && steps.detect.outputs.ecosystem == 'node'
+        run: npm ci
 
       - name: Run prettier on modified files
         if: steps.bump.outputs.new_version != '' && steps.detect.outputs.ecosystem == 'node'
