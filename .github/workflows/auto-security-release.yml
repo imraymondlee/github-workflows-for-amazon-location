@@ -18,6 +18,13 @@ on:
         required: false
         type: boolean
         default: false
+    secrets:
+      APP_ID:
+        description: "GitHub App ID for aws-geo-auto-release-sec-bot"
+        required: true
+      APP_PRIVATE_KEY:
+        description: "GitHub App private key for aws-geo-auto-release-sec-bot"
+        required: true
 
 permissions:
   contents: write
@@ -178,11 +185,19 @@ jobs:
         if: steps.bump.outputs.new_version != '' && steps.detect.outputs.ecosystem == 'node'
         run: npm run prettier
 
+      - name: Generate GitHub App token
+        if: steps.bump.outputs.new_version != ''
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
       - name: Create Pull Request
         if: steps.bump.outputs.new_version != ''
         uses: peter-evans/create-pull-request@v6
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
           branch: auto-release/${{ inputs.tag-prefix }}${{ steps.bump.outputs.new_version }}
           base: main
           commit-message: "chore: bump ${{ steps.detect.outputs.ecosystem }} version to ${{ steps.bump.outputs.new_version }} (security patches)"
