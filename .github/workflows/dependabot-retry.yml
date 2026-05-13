@@ -1,0 +1,113 @@
+name: Dependabot Auto Retry
+
+on:
+  workflow_call:
+    secrets:
+      APP_ID:
+        description: "GitHub App ID for aws-geo-auto-release-sec-bot"
+        required: true
+      APP_PRIVATE_KEY:
+        description: "GitHub App private key for aws-geo-auto-release-sec-bot"
+        required: true
+
+permissions:
+  security-events: write
+  pull-requests: read
+
+jobs:
+  retry-dependabot-alerts:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Retry stale Dependabot alerts
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+            // Alert ecosystem → Dependabot branch slug mapping
+            const ecosystemToBranchSlug = {
+              npm: 'npm_and_yarn',
+              go: 'gomod',
+              actions: 'github_actions',
+              rubygems: 'bundler',
+              pip: 'pip',
+              cargo: 'cargo',
+              composer: 'composer',
+              nuget: 'nuget',
+              maven: 'maven',
+              docker: 'docker',
+              hex: 'hex',
+              elm: 'elm',
+              pub: 'pub',
+              swift: 'swift',
+              gradle: 'gradle',
+              github_actions: 'github_actions',
+            };
+
+            // List open dependabot alerts
+            const alerts = await github.paginate(
+              github.rest.dependabot.listAlertsForRepo,
+              { owner, repo, state: 'open', sort: 'created', direction: 'asc', per_page: 100 }
+            );
+
+            const staleAlerts = alerts.filter(a => a.created_at < oneDayAgo);
+            core.info(`Found ${staleAlerts.length} open alerts older than 1 day (of ${alerts.length} total)`);
+
+            // Get open Dependabot PRs to find which alerts already have a PR
+            const pulls = await github.paginate(
+              github.rest.pulls.list,
+              { owner, repo, state: 'open', per_page: 100 }
+            );
+            const dependabotPRs = pulls.filter(p => p.user?.login === 'dependabot[bot]');
+            const dependabotBranches = new Set(dependabotPRs.map(p => p.head.ref));
+
+            let retried = 0;
+            let skipped = 0;
+            for (const alert of staleAlerts) {
+              const pkg = alert.dependency?.package?.name || 'unknown';
+              const ecosystem = alert.dependency?.package?.ecosystem || '';
+              const branchSlug = ecosystemToBranchSlug[ecosystem] || ecosystem;
+
+              // Check branch names using the correct slug
+              const branchMatch = [...dependabotBranches].some(
+                b => b.startsWith(`dependabot/${branchSlug}/`) && b.includes(pkg)
+              );
+
+              // Also check PR titles to catch group PRs (whose branches don't contain package names)
+              const titleMatch = dependabotPRs.some(
+                p => p.title.includes(pkg)
+              );
+
+              if (branchMatch || titleMatch) {
+                core.info(`Skipping alert #${alert.number} (${pkg}) — PR already exists`);
+                skipped++;
+                continue;
+              }
+
+              core.info(`Retrying alert #${alert.number} (${pkg})`);
+              try {
+                await github.request('POST /repos/{owner}/{repo}/dependabot/alerts/{alert_number}/rerun', {
+                  owner,
+                  repo,
+                  alert_number: alert.number,
+                });
+                core.info(`  ✓ Alert #${alert.number} retried`);
+                retried++;
+              } catch (err) {
+                core.warning(`  ✗ Failed to retry alert #${alert.number}: ${err.message}`);
+              }
+            }
+
+            core.summary.addHeading('Dependabot Auto Retry', 2);
+            core.summary.addRaw(`Retried ${retried} alerts, skipped ${skipped} (PR already exists)`);
+            await core.summary.write();
