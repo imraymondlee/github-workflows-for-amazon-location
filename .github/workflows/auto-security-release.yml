@@ -88,7 +88,7 @@ jobs:
           echo "$COMMITS"
 
       - name: Verify all commits are from dependabot
-        if: steps.check-commits.outputs.has_commits == 'true' && inputs.force == false
+        if: steps.check-commits.outputs.has_commits == 'true'
         id: verify-authors
         run: |
           LAST_TAG="${{ steps.last-tag.outputs.tag }}"
@@ -96,12 +96,19 @@ jobs:
           if [ -n "$NON_BOT_AUTHORS" ]; then
             echo "Non-dependabot commits found from:"
             echo "$NON_BOT_AUTHORS"
-            echo "Skipping auto-release — only dependabot-only changes qualify."
+            if [ "${{ inputs.force }}" != "true" ]; then
+              echo "Skipping auto-release — only dependabot-only changes qualify."
+              echo "dependabot_only=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Force flag set — proceeding with minor version bump"
             echo "dependabot_only=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "bump_type=minor" >> "$GITHUB_OUTPUT"
+          else
+            echo "All commits are from dependabot."
+            echo "dependabot_only=true" >> "$GITHUB_OUTPUT"
+            echo "bump_type=patch" >> "$GITHUB_OUTPUT"
           fi
-          echo "dependabot_only=true" >> "$GITHUB_OUTPUT"
-          echo "All commits are from dependabot."
 
       - name: Bump version (node)
         if: (steps.verify-authors.outputs.dependabot_only == 'true' || inputs.force) && steps.detect.outputs.ecosystem == 'node'
@@ -109,7 +116,12 @@ jobs:
         run: |
           CURRENT=$(jq -r .version package.json)
           IFS='.' read -r major minor patch <<< "$CURRENT"
-          NEW_VERSION="${major}.${minor}.$((patch + 1))"
+          BUMP_TYPE="${{ steps.verify-authors.outputs.bump_type || 'patch' }}"
+          if [ "$BUMP_TYPE" = "minor" ]; then
+            NEW_VERSION="${major}.$((minor + 1)).0"
+          else
+            NEW_VERSION="${major}.${minor}.$((patch + 1))"
+          fi
           jq --arg v "$NEW_VERSION" '.version = $v' package.json > tmp.json && mv tmp.json package.json
           if [ -f package-lock.json ]; then
             jq --arg v "$NEW_VERSION" '.version = $v | .packages[""].version = $v' package-lock.json > tmp.json && mv tmp.json package-lock.json
@@ -123,7 +135,12 @@ jobs:
         run: |
           CURRENT=$(jq -r .version Package.version)
           IFS='.' read -r major minor patch <<< "$CURRENT"
-          NEW_VERSION="${major}.${minor}.$((patch + 1))"
+          BUMP_TYPE="${{ steps.verify-authors.outputs.bump_type || 'patch' }}"
+          if [ "$BUMP_TYPE" = "minor" ]; then
+            NEW_VERSION="${major}.$((minor + 1)).0"
+          else
+            NEW_VERSION="${major}.${minor}.$((patch + 1))"
+          fi
           jq --arg v "$NEW_VERSION" '.version = $v' Package.version > tmp.json && mv tmp.json Package.version
           echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
           echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
@@ -143,7 +160,12 @@ jobs:
             exit 1
           fi
           IFS='.' read -r major minor patch <<< "$CURRENT"
-          NEW_VERSION="${major}.${minor}.$((patch + 1))"
+          BUMP_TYPE="${{ steps.verify-authors.outputs.bump_type || 'patch' }}"
+          if [ "$BUMP_TYPE" = "minor" ]; then
+            NEW_VERSION="${major}.$((minor + 1)).0"
+          else
+            NEW_VERSION="${major}.${minor}.$((patch + 1))"
+          fi
           sed -i "s/$CURRENT/$NEW_VERSION/" "$GRADLE_FILE"
           echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
           echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
@@ -201,8 +223,8 @@ jobs:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
 
-      - name: Create Pull Request
-        if: steps.bump.outputs.new_version != ''
+      - name: Create Pull Request (security patch)
+        if: steps.bump.outputs.new_version != '' && steps.verify-authors.outputs.bump_type == 'patch'
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ steps.app-token.outputs.token }}
@@ -232,5 +254,38 @@ jobs:
           labels: |
             automated
             security
+            release
+          delete-branch: true
+
+      - name: Create Pull Request (forced minor)
+        if: steps.bump.outputs.new_version != '' && steps.verify-authors.outputs.bump_type == 'minor'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          branch: auto-release/${{ inputs.tag-prefix }}${{ steps.bump.outputs.new_version }}
+          base: main
+          commit-message: "chore: bump ${{ steps.detect.outputs.ecosystem }} version to ${{ steps.bump.outputs.new_version }}"
+          title: "chore: release ${{ inputs.tag-prefix }}${{ steps.bump.outputs.new_version }} - TODO"
+          body: |
+            ## Release ${{ inputs.tag-prefix }}${{ steps.bump.outputs.new_version }}
+
+            This PR was auto-generated by the **Auto Security Release** workflow (forced).
+
+            ### What changed
+            - Ecosystem: `${{ steps.detect.outputs.ecosystem }}`
+            - Working directory: `${{ inputs.working-directory }}`
+            - Version bumped from `${{ steps.bump.outputs.current }}` → `${{ steps.bump.outputs.new_version }}`
+            - `CHANGELOG.md` updated with dependency update entries
+            - ⚠️ Contains non-dependabot commits — please update the title and describe the changes below
+
+            ### Summary
+            TODO — describe what's included in this release
+
+            ### Before merging
+            - [ ] Update the PR title with a meaningful description
+            - [ ] Verify CI passes
+            - [ ] Confirm no unintended changes are included
+          labels: |
+            automated
             release
           delete-branch: true
