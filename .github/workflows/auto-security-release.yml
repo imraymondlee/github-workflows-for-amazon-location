@@ -197,13 +197,13 @@ jobs:
             PR_LINES="${PR_LINES}\n- ${SUMMARY}"
           done <<< "$(git log "${LAST_TAG}..HEAD" --no-merges --oneline -- "${{ inputs.working-directory }}")"
 
-          ENTRY="## ${NEW_VERSION}\n\n### ✨ Features and improvements\n\n- Several dependency version updates\n${PR_LINES}\n"
+          ENTRY="# ${NEW_VERSION}\n\n### ✨ Features and improvements\n\n- Several dependency version updates\n${PR_LINES}\n"
 
           if [ -f CHANGELOG.md ]; then
-            { head -1 CHANGELOG.md; echo ""; echo -e "$ENTRY"; tail -n +2 CHANGELOG.md; } > CHANGELOG.tmp
+            { echo -e "$ENTRY"; cat CHANGELOG.md; } > CHANGELOG.tmp
             mv CHANGELOG.tmp CHANGELOG.md
           else
-            echo -e "# Changes\n\n${ENTRY}" > CHANGELOG.md
+            echo -e "$ENTRY" > CHANGELOG.md
           fi
           echo "CHANGELOG.md updated for ${NEW_VERSION}"
 
