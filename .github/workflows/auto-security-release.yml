@@ -230,7 +230,7 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           branch: auto-release/${{ inputs.tag-prefix }}${{ steps.bump.outputs.new_version }}
           base: main
-          commit-message: "chore: bump ${{ steps.detect.outputs.ecosystem }} version to ${{ steps.bump.outputs.new_version }} (security patches)"
+          commit-message: "chore: bump release version to ${{ steps.bump.outputs.new_version }} (security patches)"
           title: "chore: release ${{ inputs.tag-prefix }}${{ steps.bump.outputs.new_version }} — security dependency updates"
           body: |
             ## Automated Security Release
@@ -264,7 +264,7 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           branch: auto-release/${{ inputs.tag-prefix }}${{ steps.bump.outputs.new_version }}
           base: main
-          commit-message: "chore: bump ${{ steps.detect.outputs.ecosystem }} version to ${{ steps.bump.outputs.new_version }}"
+          commit-message: "chore: bump release version to ${{ steps.bump.outputs.new_version }}"
           title: "chore: release ${{ inputs.tag-prefix }}${{ steps.bump.outputs.new_version }} - TODO"
           body: |
             ## Release ${{ inputs.tag-prefix }}${{ steps.bump.outputs.new_version }}
